@@ -113,14 +113,20 @@ class CallMediaQueue extends EventEmitter {
 
 	// Sends audio to Twilio as it arrives– faster than real-time
 	private sendToTwilio(socketMessage: SocketMessage) {
-		this.socket.send(
-			JSON.stringify({
-				event: socketMessage.event,
-				streamSid: this.streamSid,
-				media: socketMessage.media,
-				mark: socketMessage.mark,
-			})
-		)
+		try {
+			this.socket.send(
+				JSON.stringify({
+					event: socketMessage.event,
+					streamSid: this.streamSid,
+					media: socketMessage.media,
+					mark: socketMessage.mark,
+				})
+			);
+		}
+		catch (error) {
+			console.error(`Error sending message to Twilio: ${error}`);
+			// TODO: implement error strategy
+		}
 	}
 
 	private clearQueue(): void {
