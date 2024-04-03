@@ -142,7 +142,7 @@ class CallMediaQueue extends EventEmitter {
 			return;
 		}
 
-		if (this.volumeLevel === 1 && mediaData.media) {
+		if (this.volumeLevel !== 1 && mediaData.media) {
 			const payloadBuffer = Buffer.from(mediaData.media.payload, 'base64');
 			const adjustedBuffer = this.adjustVolume(payloadBuffer);
 			mediaData.media.payload = adjustedBuffer.toString('base64');
