@@ -27,6 +27,7 @@ class CallMediaQueue extends EventEmitter {
 	private bytesPerSample: number	// 2 bytes per sample for 16-bit PCM
 	private packetDuration: number	// duration of each packet in ms. Calculated later
 	private volumeLevel: number		// volume level of the audio stream
+	private bufferLimit: number		// maximum number of packets to buffer
 
 	constructor(args: CallMediaQueueArgs) {
 		super()
@@ -34,26 +35,41 @@ class CallMediaQueue extends EventEmitter {
 		this.isSending = false
 		this.streamSid = args.streamSid
 		this.socket = args.socket
+		
+		// audio format
 		this.channels = 1			// mono audio
 		this.sampleRate = 16000		// 16 kHz
 		this.bytesPerSample = 2		// 16-bit PCM
+
+		// audio processing
 		this.packetDuration = 0
 		this.volumeLevel = 1
+		this.bufferLimit = 1000;	// arbitrary limit to prevent memory issues
+
+		this.socket.on('error', (error) => {
+			console.error(`WebSocket Error: ${error}`);
+			// TODO: Implement error strategy
+		});
 
 		this.socket.on('message', async (message) => {
-			const data = JSON.parse(message.toString())
+			try {
+				const data = JSON.parse(message.toString())
 
-			switch (data.event) {
-				case 'mark': {
-					this.emit('mark', data.mark.name)
-					break
+				switch (data.event) {
+					case 'mark': {
+						this.emit('mark', data.mark.name)
+						break
+					}
 				}
+			}
+			catch (error) {
+				console.error(`Error parsing message data: ${error}`);
+				// TODO: Implement error strategy
 			}
 		})
 	}
 
-	private processNext(): void {
-		
+	private processNext(): void {		
         if (!this.isSending && this.queue.length > 0) {
             this.isSending = true
             // Delaying the process to ensure packets are sent in real-time
@@ -71,22 +87,28 @@ class CallMediaQueue extends EventEmitter {
 			return
 		}
 	
-		const socketMessage = this.queue.shift();
-	
-		if (socketMessage) {
-			if (socketMessage?.media?.payload) {
-				// Determine the duration of the packet from the payload size (from bytes to milliseconds)
-				// Then use the duration to send the packet in real-time
-				const payloadBuffer = Buffer.from(socketMessage.media.payload, 'base64');
-				const numberOfSamples = payloadBuffer.length / (this.channels * this.bytesPerSample);
-				this.packetDuration = (numberOfSamples / this.sampleRate) * 1000 // converting seconds to milliseconds
+		try {
+			const socketMessage = this.queue.shift();
+		
+			if (socketMessage) {
+				if (socketMessage?.media?.payload) {
+					// Determine the duration of the packet from the payload size (from bytes to milliseconds)
+					// Then use the duration to send the packet in real-time
+					const payloadBuffer = Buffer.from(socketMessage.media.payload, 'base64');
+					const numberOfSamples = payloadBuffer.length / (this.channels * this.bytesPerSample);
+					this.packetDuration = (numberOfSamples / this.sampleRate) * 1000 // converting seconds to milliseconds
+				}
+			
+				this.sendToTwilio(socketMessage);
 			}
 		
-			this.sendToTwilio(socketMessage);
+			this.isSending = false;
+			this.processNext();
 		}
-	
-		this.isSending = false;
-		this.processNext();
+		catch (error) {
+			console.error(`Error sending audio packet: ${error}`);
+			// TODO: Implement error strategy
+		}
 	}
 
 	// Sends audio to Twilio as it arrives– faster than real-time
@@ -106,6 +128,14 @@ class CallMediaQueue extends EventEmitter {
 	}
 
 	private enqueue(mediaData: SocketMessage): void {
+		if (this.queue.length >= this.bufferLimit) {
+			// Buffer limit reached.
+			// For now, we simply return and ignore/drop additional packets.
+			// TODO: Implement a strategy to handle this scenario.
+			console.warn('Buffer limit reached. Incoming packet dropped.');
+			return;
+		}
+
 		if (this.volumeLevel === 1 && mediaData.media) {
 			const payloadBuffer = Buffer.from(mediaData.media.payload, 'base64');
 			const adjustedBuffer = this.adjustVolume(payloadBuffer);
@@ -124,22 +154,28 @@ class CallMediaQueue extends EventEmitter {
 		if (this.volumeLevel === 1) {
 			return audioData;
 		}
+
+		try {
+			const newAudioData = Buffer.alloc(audioData.length);
 	
-		const newAudioData = Buffer.alloc(audioData.length);
+			for (let i = 0; i < audioData.length; i += 2) {
+				if (i + 1 < audioData.length) {
+					const sample = audioData.readInt16LE(i);
+					let newSample = Math.floor(sample * this.volumeLevel);
+					
+					// Clipping the audio signal to prevent distortion
+					newSample = Math.min(Math.max(newSample, -32768), 32767);
+			
+					newAudioData.writeInt16LE(newSample, i);
+				}
+			}
 	
-		for (let i = 0; i < audioData.length; i += 2) {
-		  if (i + 1 < audioData.length) {
-			const sample = audioData.readInt16LE(i);
-			let newSample = Math.floor(sample * this.volumeLevel);
-			  
-			// Clipping the audio signal to prevent distortion
-			newSample = Math.min(Math.max(newSample, -32768), 32767);
-	
-			newAudioData.writeInt16LE(newSample, i);
-		  }
+			return newAudioData;
 		}
-	
-		return newAudioData;
+		catch (error) {
+			console.error(`Error during audio processing: ${error}`);
+			throw error;
+	  	}
 	}
 
 	// New audio payload available
@@ -171,7 +207,20 @@ class CallMediaQueue extends EventEmitter {
 
 	// Set the volume of the audio stream, 0-1
 	setVolume(volume: number): void {
+		if (typeof volume !== 'number' || volume < 0 || volume > 1) {
+			throw new Error('Invalid volume level. It should be a number between 0 and 1.');
+		}		
+
 		this.volumeLevel = Math.max(0, Math.min(1, volume));
+	}
+
+	// Set the buffer limit to prevent memory issues
+	setBufferLimit(limit: number): void {
+		if (typeof limit !== 'number' || limit < 0) {
+			throw new Error('Invalid buffer limit. It should be a positive number.');
+		}
+
+		this.bufferLimit = limit;
 	}
 
 }
